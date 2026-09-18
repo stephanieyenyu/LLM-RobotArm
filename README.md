@@ -1,361 +1,498 @@
-﻿# LLM_RobotArm
+# LLM_RobotArm — Natural Language Control for a UR3e Robot Arm via LLM and Vision Perception
 
-以中文自然語言指令控制 UR3e 機械手臂的框架。RealSense D435i 即時偵測工作台物件 → OpenAI gpt-5 解析指令 → Unity 送 URScript 到手臂。
+LLM_RobotArm lets a UR3e robot arm be operated with typed natural-language
+commands. It was built as an undergraduate capstone project (專題) at
+National Tsing Hua University, developed 2026-06-30 – 2026-09-18, by a team
+of NTHU students working collectively without a fixed division of labour.
+An Intel RealSense D435i camera watches the workspace in real time, an LLM
+(OpenAI GPT-5, with Gemini cross-reviewing pattern layouts) turns a typed
+Chinese command into a task, and a deterministic C# planner and safety
+validator turn that task into UR3e motion executed through Unity.
 
-## 系統流程
+Sending a single URScript command to a UR3e is not the hard part — the TCP
+interface handles that directly. Three things took the work:
+
+**Reconciling an LLM's non-deterministic output with a physical safety
+envelope.** An LLM asked for joint angles or raw URScript can propose
+something wrong or simply different on every call. The motion planner
+therefore never lets the LLM emit a coordinate, a speed, or raw URScript —
+it can only compose from a seven-function whitelist, and every resulting
+plan is checked by a deterministic safety validator before a motor moves.
+
+**Recovering from a step that half-fails without losing track of the
+world.** A batch plan computed once and executed blindly compounds error:
+if step one drifts, every later step still executes against the original,
+now-stale scene. The system instead re-senses and re-verifies before and
+after every single step, so a partial failure can be retried or replanned
+against the real current state rather than an assumption.
+
+**Getting two independent LLMs to agree on a bitmap layout without a human
+arbitrating.** A single model's proposed pattern had no check on it. Every
+`arrange_pattern` command now has OpenAI and Gemini independently propose a
+candidate bitmap and cross-review each other's, with a weighted vote
+deciding the result.
+
+It contains one learned component whose behaviour is bounded: the LLM
+never outputs raw URScript, joint angles, or arbitrary coordinates — every
+plan it proposes is filtered through a whitelist and a deterministic
+safety validator before anything physical happens.
+
+## Demo
+
+*Demo video: pending. A recorded walkthrough exists and is being added —
+see `docs/known-issues.md` (B-1) for tracking.*
+
+## What it does
+
+**Turns a typed Chinese sentence into one of three concrete task types
+before any coordinate math happens.** `CommandRouter` classifies each
+command as `arrange_pattern`, `move_relative`, or `stack`; every
+downstream layer works from that classification rather than re-parsing
+free text.
+
+**Builds every letter or shape pattern by having two LLMs argue over
+it.** `PatternDesigner` asks OpenAI and Gemini to each independently
+generate a candidate bitmap, has them cross-review one another's
+candidate, and picks a result by a weighted vote (OpenAI 0.80 / Gemini
+0.20) over up to two revision rounds.
+
+**Never lets an LLM see a raw coordinate or emit raw URScript.**
+`MotionPlanner` composes motion only from seven whitelisted functions
+(`move_above`, `descend`, `grasp`, `release`, `lift`, `wait`, `go_home`);
+`MotionPlanValidator` rejects any plan outside the whitelist, the 20-call
+limit, or the 0.05–0.15 m safe-height envelope before Unity ever sees it.
+
+**Re-senses the workspace before every single step, not once per
+command.** Each step in a multi-step task triggers a fresh RealSense
+scene snapshot and a fresh plan for just that step, so drift or a missed
+grasp on step one doesn't propagate unnoticed into step five.
+
+**Refuses to stack on a measured height it doesn't trust.** Stacking
+targets use the source block's actual measured top-surface height
+(`targetZ = reference.Z + source.Z`) rather than an assumed nominal
+height, and rejects the step outright if the measurement falls outside
+0.005–0.100 m rather than proceeding on a bad depth read.
+
+**Keeps a virtual mirror of the workspace in Unity for visual
+confirmation.** `SceneSyncer` refreshes a Unity-side copy of every
+detected object whenever the system returns to idle, remapping the
+perception system's right-handed QR frame into Unity's left-handed
+coordinate space.
+
+## Scope
+
+| Component | Tech | Responsibility |
+|---|---|---|
+| Perception server | Python 3.10+, Flask, OpenCV, YOLO11n, RealSense SDK | Streams RealSense frames; detects HSV cubes/dominoes, ArUco QR anchors, and COCO objects; serves scene snapshots over HTTP |
+| C# orchestrator | .NET 8 | Routes commands, runs the five-layer plan/execute/verify loop, calls OpenAI/Gemini, validates safety |
+| Unity executor | Unity 2022.3.62f3, C# | Polls the plan file, converts whitelisted robot functions to URScript, drives the UR3e over TCP, mirrors the scene visually |
+
+13 C# orchestrator source files (3,558 lines) · 1 perception server file
+(1,188 lines) · 6 Flask HTTP routes across 5 paths · 8 Unity C# scripts
+(2,271 lines)
+
+These counts are reproducible directly from the repository: `wc -l
+csharp_server/*.cs`, `wc -l csharp_server/perception_server.py`, `grep -c
+'@app.route' csharp_server/perception_server.py`, and `wc -l
+unity_project/Assets/Scripts/*.cs`.
+
+Development period: 2026-06-30 – 2026-09-18 (81 commits).
+
+This was a collective NTHU capstone effort. Commit authorship in this
+repository does not reliably map to who wrote which part — contributors
+shared machines during development — so responsibilities above are not
+broken out by person.
+
+## Test Setup and Success Criterion
+
+All testing was performed on a single physical rig: one table with four
+printed ArUco markers (QR1–QR4) defining the work plane, an Intel
+RealSense D435i mounted overhead, and a UR3e arm (or URSim in simulation)
+connected through the Teach Pendant's Remote Control interface. Testing
+was carried out by the project team during development, not by an
+independent evaluator, using whatever objects were on hand — the YOLO
+COCO whitelist items, plus 2.5 cm HSV cubes and 5×2.5×2.5 cm dominoes —
+rather than a fixed labelled dataset.
+
+A run is considered successful when a typed command results in the UR3e
+completing the corresponding motion end-to-end and `Verifier` confirms
+the expected object arrangement, without manual intervention beyond what
+the system does automatically (its own retry/replan loop).
+
+**What this setup cannot validate**: success rate, accuracy, or timing
+under varied lighting, a larger or different object set, repeated trials
+of the same command, or any load beyond one operator issuing commands one
+at a time. No batch of trials has been logged — see `docs/metrics.md`.
+
+## Measurement Basis
+
+| Measurement | Value | Nature |
+|---|---|---|
+| Safe height envelope | 0.05 – 0.15 m | design constant, not measured (`MotionPlanValidator.cs:78-104`) |
+| Max function calls per plan | 20 | design constant, not measured (`MotionPlanValidator.cs:86`) |
+| Per-target retry limit | 1 | design constant, not measured (`Program.cs:226`) |
+| Motion planner LLM timeout | 180 s | design constant, not measured (`MotionPlanner.cs:10`) |
+| 3D feasibility LLM timeout | 300 s | design constant, not measured (`SpatialPatternDesigner.cs:11`) |
+| Unity step timeout | 600 s | design constant, not measured (`Program.cs:79`) |
+| Accepted measured-height range for stacking | 0.005 – 0.100 m | design constant, not measured (`SingleObjectTaskBuilder.cs:11-12`) |
+| TCP position tolerance | 0.012 m | design constant, not measured (`JsonExecutor.cs:100`) |
+| Motion confirmation timeout | 180 s | design constant, not measured (`JsonExecutor.cs:99`) |
+| Base-exclusion radius | 0.16 m | design constant, not measured (`JsonExecutor.cs:95`) |
+| Manual home-retry limit after a protective stop | 1 | design constant, not measured (`JsonExecutor.cs:106`) |
+| OpenAI/Gemini bitmap vote weighting | 0.80 / 0.20 | design constant, not measured (`PatternDesigner.cs:11-12`) |
+| Bitmap generation revision rounds | 2 | design constant, not measured (`PatternDesigner.cs:10`) |
+| Scene refresh interval | 200 ms | design constant, not measured (`perception_server.py`) |
+
+**None of these are empirical outcomes.** Every row above is a value the
+team chose before running the system, not a value derived from measured
+behaviour. See `docs/metrics.md` for a fuller accounting of what has and
+hasn't actually been measured.
+
+**One documented internal inconsistency.** The project's written report
+states the per-target retry limit as 2; the shipped code
+(`Program.cs:226`) sets `MAX_RETRY = 1`. This README follows the code.
+See `docs/known-issues.md` D-2.
+
+## Problem Statement
+
+An operator wants to describe a task in natural Chinese — 「排 H」,
+「把黃色方塊往前移 5 公分」 — and have a UR3e arm carry it out. Asking an LLM
+directly for joint angles or URScript fails for a specific reason: an
+LLM's output is not guaranteed correct or repeatable, and a wrong joint
+command executed on real hardware can damage the arm, the workspace, or
+whoever is standing nearby. Restricting the LLM to a small set of
+pre-validated actions removes that danger, but introduces a different
+problem: the LLM must still turn an open-ended sentence into a sequence
+of those actions, coordinated with a perception system that has its own
+real error (camera calibration drift, depth noise, occlusion), across a
+task that must survive a step going wrong partway through without
+leaving the arm, the object, or the system's internal state in an
+inconsistent place.
+
+The problem this project addresses is: how to let an LLM plan robot
+motion from natural language while keeping every physical consequence of
+that plan bounded, checked, and recoverable — without falling back to
+either a fixed hard-coded task list (which isn't natural-language control
+at all) or an unconstrained LLM-to-hardware pipeline (which isn't safe).
+
+## System Architecture
 
 ```
-Unity UI（輸入指令）
+Unity UI (command input)
    ↓  StreamingAssets/user_input.txt
 csharp_server (dotnet)
    ↓  HTTP GET localhost:5000/scene
 perception_server (Python + Flask)
-   ├─ RealSense 常駐串流
-   ├─ YOLO11n（COCO 物件） + HSV 立方體 + ArUco QR
-   └─ 每 200ms 更新場景，回傳 3D 世界座標
+   ├─ persistent RealSense stream
+   ├─ YOLO11n (COCO objects) + HSV cubes/dominoes + ArUco QR anchors
+   └─ scene refreshed every 200 ms, returns 3D world coordinates
    ↓
-LLM CommandRouter（arrange_pattern / move_relative / stack）
-   ├─ PatternDesigner：OpenAI + Gemini 獨立生成 bitmap 並交叉評審
-   └─ SingleObjectTaskBuilder：方向/距離或疊放目標 → 實際座標
+LLM CommandRouter (arrange_pattern / move_relative / stack)
+   ├─ PatternDesigner: OpenAI + Gemini independently generate a bitmap, cross-review each other
+   └─ SingleObjectTaskBuilder: direction/distance or stack target → actual coordinates
    ↓
 LLM MotionPlanner → MotionPlanValidator
-   ↓  StreamingAssets/current_step.json（robot function sequence）
-Unity JsonExecutor（高階 function → URScript）
+   ↓  StreamingAssets/current_step.json (robot function sequence)
+Unity JsonExecutor (high-level function → URScript)
    ↓  TCP 30002 URScript
 UR3e
 ```
 
-## 檔案總覽
+The orchestrator runs a five-layer closed loop per command
+(`Program.cs:12-19`):
 
-**csharp_server/**
-- `perception_server.py` — RealSense 常駐 + YOLO + HSV + QR 偵測 + Part B 3D 座標 + Flask HTTP
-- `Program.cs` — 監聽 user_input.txt、路由任務、執行感知/規劃/驗證閉環
-- `CommandRouter.cs` — LLM 判斷排圖、相對移動或疊放
-- `PatternDesigner.cs` — OpenAI 與 Gemini 各自生成 bitmap、互審對方候選後選出結果
-- `SingleObjectTaskBuilder.cs` — 用確定性幾何計算相對移動與疊放座標
-- `MotionPlanner.cs` — LLM 使用白名單 robot functions 規劃動作
-- `MotionPlanValidator.cs` — 執行前安全狀態機驗證
-- `RobotPlan.cs` — plan / SceneObject 資料類別
-- `models/pliers.pt`、`yolo11n.pt` — YOLO 權重
-- `QRcode/aruco_1~4.png` — 可列印定位碼
+| Layer | Component | Produces |
+|---|---|---|
+| 1 | PatternDesigner | CanonicalPattern |
+| 2 | LayoutRealizer | List\<TargetCell\> |
+| 3 | TaskAssigner | one Assignment per step |
+| 4A | MotionPlanner | LLM-composed robot functions |
+| 4B | MotionPlanValidator / Unity | safety-checked execution |
+| 5 | Verifier | retry / replan / abort decision |
 
-**unity_project/Assets/Scripts/**
-- `UIManager.cs` — 指令輸入 UI、監看計畫更新
-- `JsonExecutor.cs` — 解譯 LLM robot function sequence、送 URScript
-- `URPackageListener.cs` — UR TCP client（port 30002）
-- `URUtil.cs`、`Util.cs` — 封包型別工具
+Splitting perception, planning, and execution into three separate
+processes — a Python Flask service, a .NET orchestrator, and a Unity
+executor — rather than one monolith lets the RealSense stream run
+continuously regardless of whether a plan is mid-execution, and lets the
+LLM-facing planning code be replaced or tested without touching the UR3e
+TCP client. The accepted cost is three separate runtimes that must be
+started in the right order for the system to work at all, plus an HTTP-
+and file-based IPC layer (`/scene`, `current_step.json`, `step_done.json`)
+in place of in-process calls.
 
-## 前置
+See `docs/architecture.md` for the full component/IPC breakdown and
+`docs/llm_motion_planner.md` for the Layer 4A whitelist and safety-limit
+deep dive.
 
-- .NET SDK 8+
-- Python 3.10+（用 `csharp_server/yolo11_env` 這個 venv）
-- Unity 2022.3 LTS
-- Intel RealSense D435i（USB 3 直接接筆電）
-- `setx OPENAI_API_KEY "sk-你的-key"` 後重開 PowerShell
-- `setx GEMINI_API_KEY "你的-Gemini-key"` 後重開 PowerShell
-- 可選：`setx GEMINI_MODEL "gemini-3.1-flash-lite"` 指定有 Free Tier 的 Gemini 模型（程式預設值亦相同）
-- UR3e 或 URSim（Teach Pendant 切 Remote Control、TCP Z offset 設 0.170、速度滑桿 100%）
-- 工作台貼四張 ArUco（QR1 左下、QR2 右下、QR3 左上、QR4 右上）
+## Design
 
-## 每次執行
+### Fixed pick-and-place sequences could not use what the LLM could actually plan
 
-**Terminal 1**（感知）：
+The early system executed the same fixed pick-and-place motion sequence
+for every task, regardless of what the LLM could contribute — easy to
+implement, but it never used the LLM's planning ability at all. The
+current `MotionPlanner` instead asks the LLM to compose a motion from a
+small robot-function API for every step. The accepted cost is that every
+LLM-composed plan must pass `MotionPlanValidator` before a single motor
+command is sent, and the LLM itself is restricted to seven whitelisted
+functions — it can never request its own coordinate, speed, or
+acceleration.
+
+### Sensing once per command could not survive an error at step one
+
+The traditional open-loop approach is Sense → Plan All → Execute All: if
+the first action drifts, every later action still executes against the
+original, now-stale scene, compounding the error. This system instead
+runs Sense → Plan One Step → Execute → Sense Again → Verify → Plan Next
+Step. The accepted cost is that every step re-senses and re-plans, which
+is slower per command than executing a pre-computed batch, in exchange
+for tolerating drift and partial failure mid-task.
+
+### A single model's bitmap was not trustworthy enough to place blocks against
+
+Generating a pattern with one LLM call had no check on what it proposed —
+whatever that one model returned was accepted. `PatternDesigner` now has
+OpenAI and Gemini each independently generate a candidate bitmap, cross-
+review one another's candidate, and resolves the result by a weighted
+vote (OpenAI 0.80 / Gemini 0.20) over up to two revision rounds. The
+accepted cost is two LLM providers and API keys required, more API calls
+per pattern command, and a command that fails outright if no bitmap is
+accepted within those two rounds.
+
+### A fixed block height could not survive being measured on a real table
+
+Assuming a nominal fixed block height for stacking targets doesn't
+reflect the block actually sitting on the table. Stacking now uses the
+source block's measured top-surface height from RealSense depth
+(`targetZ = reference.Z + source.Z`), accepted only within 0.005–0.100 m.
+The accepted cost is that a reading outside that band is rejected outright
+and forces a fresh scene scan rather than proceeding on an untrustworthy
+depth value.
+
+### A fixed delay could not tell "still moving" from "something went wrong"
+
+Advancing to the next motion after a fixed delay elapsed could not
+distinguish a slow-but-fine motion from a stalled or faulted one — as the
+code itself notes, "do not advance merely because a fixed delay
+elapsed." Every motion is now confirmed against the UR secondary-
+interface TCP feedback, within a 0.012 m tolerance, before advancing, up
+to a 180 s timeout. The accepted cost is that after a protective or
+emergency stop, the interrupted motion is never automatically resent —
+only a single manual return-to-home retry is permitted — trading
+throughput for never repeating a motion blind after a safety stop.
+
+### Pliers detection could not clear the confidence bar on the real workspace
+
+The perception module was written to load a custom-trained pliers model
+alongside YOLO11n. In practice, the domain gap between the training
+dataset (Roboflow) and the real overhead workspace scene kept confidence
+under 0.06 — unusable. Pliers detection is currently disabled
+(`PLIERS_MODEL = None`), deferred until real photos of the workspace are
+available to fine-tune on. The accepted cost is that pliers are not
+detectable at all right now, and the module's own docstring is currently
+stale about this (tracked in `docs/known-issues.md` D-1).
+
+## Evaluation
+
+No controlled batch of trials has been run and logged (see
+`docs/metrics.md`), so this section reports what has and hasn't been
+observed rather than a success-rate table.
+
+**Observed working end-to-end**: `arrange_pattern`, `move_relative`, and
+`stack` commands have each been run against the physical rig and
+completed, including the closed-loop retry path (falling back to an
+untried same-color/same-shape block on repeated failure) and the
+dual-model bitmap cross-review.
+
+**Never observed to complete**: pliers detection — the model is disabled,
+so no pliers-related plan has ever been attempted, successfully or
+otherwise. Multi-layer 3D voxel stacking beyond the current single-
+depth-plane implementation has not been evaluated for arm reachability or
+inter-column support; `SpatialPatternDesigner`'s feasibility check covers
+glyph geometry, not whether the arm can physically reach every resulting
+cell.
+
+**What the demo video does and doesn't substitute for**: a recorded
+walkthrough exists (pending — see Demo) and shows the pipeline working on
+one run. It is evidence the system can work, not evidence of how often it
+does.
+
+## Threats to Validity
+
+**External validity.** All testing used one table, one lighting
+condition, and one physical rig. Nothing here shows the behaviour
+generalizes to a different workspace, camera mount height, or lighting.
+
+**Construct validity.** "Task completed" is judged by `Verifier`'s own
+position/shape check against the same camera that placed the object — a
+systematic camera bias would still pass `Verifier` while being wrong in
+the real-world frame.
+
+**Internal validity.** Every result blends perception, LLM planning, and
+physical execution in one closed loop. A failure can't currently be
+attributed to a single layer without additional per-layer logging, which
+doesn't exist.
+
+**Instrumentation.** There is no logging pipeline. `Console.WriteLine`
+output (e.g. `Program.cs:490`'s final match-count print) is the only
+record of a run, and it isn't persisted — there is nothing today that
+would let anyone go verify a past run's numbers.
+
+**Configuration.** Two failure modes fail silently rather than loudly:
+YOLO/pliers `.pt` model weight files are gitignored and not distributed
+with this repository, so a fresh clone with no weights added will simply
+detect nothing, without an obvious runtime error pointing at the cause
+(`docs/known-issues.md` C-1); and two root-level Unity `Packages/`/
+`ProjectSettings/` folders duplicate — and diverge from —
+`unity_project/`'s (missing `com.unity.nuget.newtonsoft-json`), so
+opening Unity at the repository root instead of `unity_project/` produces
+a project that looks valid but isn't (`docs/known-issues.md` C-2).
+
+## Open Problems
+
+**Does two-model cross-review actually reduce bitmap non-determinism, or
+just relocate it?** `arrange_pattern` for the same command can produce a
+different bitmap across runs, because the layout is LLM-generated rather
+than deterministically retrieved. Whether the 0.80/0.20 vote weighting is
+meaningfully narrowing that variance, versus the two-round revision cap
+simply capping how much variance is allowed through, hasn't been
+measured — answering it needs a batch of repeated identical commands with
+logged bitmap output, which doesn't currently exist.
+
+**How far from optimal are the greedy packing and assignment
+heuristics?** Domino packing (`LayoutRealizer`) and source-to-target
+assignment (`TaskAssigner`) both use greedy heuristics with no
+optimality guarantee. Whether the gap to an optimal assignment matters in
+practice at this cell count and object scale, or is negligible, is open.
+
+**Can arm reachability and inter-column support be checked with the same
+deterministic-validator approach already used for 2D safety?** The 3D
+voxel prototype (`SpatialPatternDesigner`) is currently constrained to a
+single Y/depth row. Extending it to true multi-depth voxel structures
+raises a question this project hasn't answered: whether reachability and
+support can be validated the same deterministic way as the existing
+height/whitelist checks, or need a different kind of check entirely.
+
+All three questions above are also bounded by the same hardware: one
+UR3e (or URSim), one RealSense D435i, one table. Any answer this project
+could produce would need to be re-checked on a different rig before it
+generalizes — this repository's own findings are a starting point for the
+next iteration, not a final measurement (see Threats to Validity). The
+next concrete step the team wants to take is collecting the logged,
+repeated-trial data described in `docs/metrics.md`'s open TODO, so these
+three questions can be asked with real numbers instead of design
+intuition.
+
+## Repository Layout
+
+```
+LLM_RobotArm/
+├── csharp_server/                   .NET 8 orchestrator + Python perception server
+│   ├── perception_server.py         1,188 lines — RealSense stream, YOLO11n, HSV cube/domino & ArUco detection, 6 Flask routes
+│   ├── Program.cs                   995 lines — five-layer plan/execute/verify orchestrator loop
+│   ├── PatternDesigner.cs           426 lines — Layer 1, dual-model (OpenAI/Gemini) bitmap generation + cross-review
+│   ├── SpatialPatternDesigner.cs    337 lines — 3D voxel glyph feasibility (single depth plane)
+│   ├── Verifier.cs                  302 lines — Layer 5, post-step scene verification
+│   ├── SingleObjectTaskBuilder.cs   224 lines — move_relative / stack coordinate math
+│   ├── MotionPlanValidator.cs       180 lines — Layer 4B, deterministic safety gate
+│   ├── LayeredTypes.cs              172 lines — shared record/class types between layers
+│   ├── BitmapParser.cs              169 lines — LLM string-array bitmap → int[,]
+│   ├── CommandRouter.cs             165 lines — classifies a command into arrange_pattern/move_relative/stack
+│   ├── TaskAssigner.cs              164 lines — Layer 3, greedy supply-to-target assignment
+│   ├── LayoutRealizer.cs            157 lines — Layer 2, bitmap → world-coordinate targets + domino packing
+│   ├── MotionPlanner.cs             155 lines — Layer 4A, LLM robot-function composition
+│   ├── RobotPlan.cs                 112 lines — plan / SceneObject data classes
+│   ├── QRcode/                      4 printable ArUco markers (aruco_1–4.png)
+│   └── csharp_server.csproj         .NET 8, OnnxRuntime, OpenAI SDK, OpenCvSharp4, ZXing.Net
+├── unity_project/Assets/Scripts/    Unity 2022.3.62f3 executor
+│   ├── JsonExecutor.cs              796 lines — Layer 4 executor, function sequence → URScript
+│   ├── SceneSyncer.cs               342 lines — snapshot sync + QR-frame↔Unity coordinate remap
+│   ├── URPackageListener.cs         287 lines — UR3e TCP client (port 30002)
+│   ├── SyncGripper.cs               207 lines — parents nearest cube to gripper on grasp/release
+│   ├── RobotArm.cs                  203 lines — joint transforms for the UR3 model
+│   ├── UIManager.cs                 183 lines — command input UI, plan-update watcher
+│   ├── Util.cs                      129 lines — mesh/geometry helpers
+│   └── URUtil.cs                    124 lines — byte-array↔struct marshalling
+├── docs/
+│   ├── architecture.md              full component/IPC/coordinate-frame breakdown
+│   ├── known-issues.md              categorized known issues
+│   ├── metrics.md                   codebase scale figures + open measurement TODOs
+│   └── llm_motion_planner.md        Layer 4A whitelist + safety-limit deep dive
+└── 專題_整合最新進度.docx            full formal project report (background, architecture, design, results, reflections)
+```
+
+## Tech Stack
+
+**Back end**  C# · .NET 8 · Microsoft.ML.OnnxRuntime 1.27.0 · OpenAI SDK 2.11.0 · OpenCvSharp4 4.13.0 · ZXing.Net 0.16.11
+
+**Perception**  Python 3.10+ · Flask · OpenCV · Ultralytics YOLO11n · pyrealsense2
+
+**Simulation / execution**  Unity 2022.3.62f3 · C#
+
+**LLMs**  OpenAI GPT-5 · Google Gemini (`gemini-3.1-flash-lite` default)
+
+**Hardware**  Intel RealSense D435i · UR3e or URSim · 4× printable ArUco markers (Dict4X4_50)
+
+## Running Locally
+
+**Terminal 1** (perception):
 ```powershell
 cd csharp_server
 yolo11_env\Scripts\python.exe perception_server.py
 ```
 
-**Terminal 2**（LLM planner）：
+**Terminal 2** (orchestrator):
 ```powershell
 cd csharp_server
 dotnet run
 ```
 
-**Unity**：Hub 開 `unity_project` → Play → Executor 的 `Ur IP` 填 UR3e IP。
-
-**Debug**：瀏覽器 `http://localhost:5000/debug/live` 看即時偵測畫面。
-
-## 指令範例
-
-- 「排 H」→ `arrange_pattern`
-- 「把黃色方塊往前移 5 公分」→ `move_relative`
-- 「把黃色方塊往左移 10 公分」→ `move_relative`
-- 「把黑色方塊疊在黃色方塊上面」→ `stack`
-
-相對方向沿用 QR 工作座標定義：`left=+X`、`right=-X`、`forward=-Y`、`backward=+Y`。
-如果現場視角相反，只需在 `SingleObjectTaskBuilder.cs` 調整這四個映射。
-
-疊放高度不使用固定積木高度。感知伺服器透過 RealSense depth 取得來源積木頂面
-`source.Z`；來源積木位於 QR 桌面時，此值就是實測積木高度。疊放目標使用
-`targetZ = reference.Z + source.Z`。若量到的來源高度不在 0.005–0.100 m，系統會拒絕
-執行並要求刷新場景，避免使用錯誤深度撞擊積木。
-
-## 支援的物件
-
-YOLO11n COCO 白名單：cup、cell phone、bottle、book、mouse、keyboard、laptop
-HSV：5cm 黃色立方體、5cm 黑色立方體
-QR：QR1-4（ArUco Dict4X4_50）
-
-## 座標校準
-
-`unity_project/Assets/Scripts/JsonExecutor.cs` 頂部三個常數：
-```csharp
-QR1_X, QR1_Y, QR1_Z   // Teach Pendant 手動 jog TCP 到 QR1 上方 5cm 讀值，Z 減 0.05 填入
-Z_CORRECTION = 0.02f  // 補償 depth 系統性偏低
-SAFE_Z_OFFSET = 0.08f // 抓取前後在物件上方留 8cm 安全空間
-```
-換場地或重貼 QRCode 一定要重新量測。
-
-## 常見問題
-
-- **「無法連線 perception_server」** → Terminal 1 沒起或還在載入 model
-- **「場景中沒有帶有效座標的物件」** → QR1-3 沒都在鏡頭裡
-- **等待 robot_plan.json 逾時（120 秒）** → OpenAI API 慢
-- **手臂完全不動** → Teach Pendant 沒切 Remote Control、速度滑桿在 0、或 IP 錯
-
-# Part A：YOLO 物件偵測與 QRCode 定位點輸出
-
-Part A 的目標是讀取一張場景圖片，偵測其中的物件與 QRCode 定位點，並輸出 JSON 檔案給下一階段的座標轉換模組使用。
-
-目前系統會讀取：
-
-```text
-csharp_server/images/test_scene.jpg
-````
-
-並輸出：
-
-```text
-csharp_server/outputs/detection_result.json
-csharp_server/outputs/visual_result.jpg
-```
-
----
-
-## 目前功能
-
-目前版本已完成以下功能：
-
-1. 讀取 `images/test_scene.jpg`
-2. 偵測 QRCode 定位點 `QR1`、`QR2`、`QR3`
-3. 使用 YOLO ONNX 模型偵測常見物件
-4. 輸出偵測結果到 `outputs/detection_result.json`
-5. 輸出視覺化檢查圖到 `outputs/visual_result.jpg`
-
-`detection_result.json` 會給 Part B 使用，Part B 可以從中取得 QRCode 和物件的影像座標。
-
-`visual_result.jpg` 是除錯用圖片，用來確認 QRCode 和物件框是否正確畫出來。
-
----
-
-## 測試圖片要求
-
-測試圖片必須放在：
-
-```text
-csharp_server/images/test_scene.jpg
-```
-
-圖片中需要包含：
-
-* `QR1`
-* `QR2`
-* `QR3`
-* 至少一個 YOLO 可辨識的常見物件，例如 cup、bottle、book、cell phone、laptop、mouse、keyboard
-
-QRCode 需要形成三角形，不能排成一直線。建議擺放方式如下：
-
-```text
-QR3
-
-QR1                 QR2
-```
-
-目前設定中，建議：
-
-* `QR1` 放左下
-* `QR2` 放右下
-* `QR3` 放左上
-
-這樣 Part B 可以用三個 QRCode 建立工作平面與座標方向。
-
----
-
-## 輸出格式
-
-程式會輸出以下 JSON 格式：
-
-```json
-{
-  "image_width": 1280,
-  "image_height": 720,
-  "objects": [
-    {
-      "name": "cup",
-      "confidence": 0.823,
-      "bbox": [779.42, 34.17, 1081.2, 328.82],
-      "center_pixel": [930.31, 181.5],
-      "source": "yolo_coco"
-    }
-  ],
-  "qrcodes": [
-    {
-      "id": "QR1",
-      "center_pixel": [310.5, 503.33],
-      "corners": [[264, 596], [264, 457], [403.5, 457]]
-    },
-    {
-      "id": "QR2",
-      "center_pixel": [908.83, 503.67],
-      "corners": [[862.5, 596.5], [862.5, 457.5], [1001.5, 457]]
-    },
-    {
-      "id": "QR3",
-      "center_pixel": [308.67, 162.83],
-      "corners": [[260, 260.5], [260, 114], [406, 114]]
-    }
-  ]
-}
-```
-
-欄位說明：
-
-```text
-image_width      圖片寬度
-image_height     圖片高度
-
-objects          YOLO 偵測到的物件清單
-name             物件名稱
-confidence       模型信心分數
-bbox             物件框座標，格式為 [x1, y1, x2, y2]
-center_pixel     物件中心點影像座標
-source           偵測來源，目前為 yolo_coco
-
-qrcodes          偵測到的 QRCode 清單
-id               QRCode 內容，例如 QR1、QR2、QR3
-center_pixel     QRCode 中心點影像座標
-corners          QRCode 角點座標
-```
-
-Part B 目前主要可以使用：
-
-```text
-qrcodes[].id
-qrcodes[].center_pixel
-objects[].name
-objects[].center_pixel
-objects[].bbox
-```
-
----
-
-## YOLO 模型限制
-
-目前使用的模型是：
-
-```text
-models/yolo11n.onnx
-```
-
-這是以 COCO 類別為基礎的 YOLO 預訓練模型。
-
-COCO 是常見物件資料集，所以目前模型可以辨識一些日常物件，例如：
-
-* person
-* bottle
-* cup
-* book
-* cell phone
-* laptop
-* mouse
-* keyboard
-* chair
-
-目前模型不能真正辨識任意自訂物件，例如：
-
-* red cube
-* blue cube
-* custom metal part
-* robot component
-* unknown tool
-
-注意：不能只修改 `yolo_detector.cs` 裡面的 `classNames` 來新增物件類別。
-
-`classNames` 只是把模型輸出的 class ID 轉換成可讀名稱。模型本身沒有訓練過的物件，單純改名稱不會讓模型真的學會辨識。
-
-如果後續需要辨識自訂物件，需要新增以下其中一種方法：
-
-1. 訓練 custom YOLO model
-2. 加入 open-vocabulary detection，例如 OWL-ViT 或 Grounding DINO
-
-目前 Part A 第一版先完成穩定的 QRCode 定位點輸出與 COCO 常見物件偵測。
-
----
-
-## 如何執行
-
-從 repo 根目錄進入 `csharp_server`：
-
-```powershell
-cd csharp_server
-```
-
-還原套件：
-
-```powershell
-dotnet restore
-```
-
-執行程式：
-
-```powershell
-dotnet run
-```
-
-執行後會產生：
-
-```text
-outputs/detection_result.json
-outputs/visual_result.jpg
-```
-
-如果 `outputs` 資料夾不存在，程式會自動建立。
-
----
-
-## 測試方式
-
-執行後請檢查：
-
-```text
-outputs/detection_result.json
-```
-
-確認 JSON 中有：
-
-* 至少一個 object
-* `QR1`
-* `QR2`
-* `QR3`
-
-也要打開：
-
-```text
-outputs/visual_result.jpg
-```
-
-確認圖片上有：
-
-* QRCode 標記
-* 物件綠色框
-* 物件名稱，例如 cup
-
----
-
-## 目前完成狀態
-
-Part A 基本版已完成。
-
-目前版本可以穩定輸出 QRCode 定位點與 YOLO 常見物件偵測結果，並已可交給 Part B 做座標轉換。
-
-目前尚未支援任意自訂物件辨識。這部分會作為後續擴充。
+**Unity**: open `unity_project` in Unity Hub → Play → set the Executor's
+`Ur IP` field to the UR3e's IP address.
+
+**Debug**: `http://localhost:5000/debug/live` in a browser shows the live
+detection feed.
+
+Prerequisites:
+- .NET SDK 8+
+- Python 3.10+, using the `csharp_server/yolo11_env` venv — no
+  `requirements.txt` is committed to this repository (`docs/known-issues.md` D-4)
+- Unity 2022.3.62f3
+- Intel RealSense D435i, USB3, connected directly (not through a hub)
+- `OPENAI_API_KEY` and `GEMINI_API_KEY` set via `setx` in PowerShell, then
+  PowerShell restarted
+- Optional `GEMINI_MODEL` (defaults to `gemini-3.1-flash-lite`, chosen for
+  its free tier)
+- A UR3e or URSim, Teach Pendant switched to Remote Control, TCP Z offset
+  set to 0.170, speed slider at 100%
+- Four printed ArUco markers on the table (QR1 bottom-left, QR2
+  bottom-right, QR3 top-left, QR4 top-right)
+- YOLO11n (and, if used, pliers) `.pt` weight files placed under
+  `csharp_server/` — these are gitignored and not distributed with this
+  repository (`docs/known-issues.md` C-1)
+
+**A second running instance will not fail loudly.** `JsonExecutor` guards
+against a duplicate command owner, but a stale Unity Play session left
+running from a previous test, or a second `dotnet run` pointed at the
+same `StreamingAssets` files, can still leave two processes racing to
+read the same step file. Restart both terminals together rather than
+assuming a fresh `dotnet run` alone is enough.
+
+**Missing weight files fail silently, not loudly.** If `yolo11n.pt` isn't
+present, detection simply returns nothing rather than erroring in an
+obviously diagnosable way — check `/health`'s `frames_processed` and
+`detect_ms` fields first if nothing is being detected.
+
+## Author
+
+NTHU (National Tsing Hua University) undergraduate capstone project
+(專題), developed 2026-06-30 – 2026-09-18.
+
+Team: 林彥妤, 張以昕, 于庭黃, and one additional contributor identified in
+this repository's history only by student ID (`112034053`).
+
+The work was genuinely collaborative; commit authorship in this
+repository does not reliably indicate who wrote which part, since
+contributors shared machines during development. No course name or
+advisor is recorded in this repository or in the accompanying report
+(`專題_整合最新進度.docx`).
