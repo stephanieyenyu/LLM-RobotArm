@@ -359,17 +359,3 @@ Part A 基本版已完成。
 目前版本可以穩定輸出 QRCode 定位點與 YOLO 常見物件偵測結果，並已可交給 Part B 做座標轉換。
 
 目前尚未支援任意自訂物件辨識。這部分會作為後續擴充。
-
-````
-
-更新後照這樣 commit：
-
-```powershell
-cd C:\Users\steph\source\repos\stephanieyenyu\LLM_RobotArm
-
-git add csharp_server/README.md
-git commit -m "Add Chinese README for Part A detection pipeline"
-git push
-````
-
-如果你還沒有加 README 檔，就在 Visual Studio 右鍵 `csharp_server`，新增 `README.md`，再貼上這份。
