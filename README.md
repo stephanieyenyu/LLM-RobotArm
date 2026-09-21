@@ -39,8 +39,8 @@ safety validator before anything physical happens.
 
 ## Demo
 
-*Demo video: pending. A recorded walkthrough exists and is being added —
-see `docs/known-issues.md` (B-1) for tracking.*
+*A recorded walkthrough of the physical rig exists and is being embedded
+here — see `docs/known-issues.md` (B-1) for tracking.*
 
 ## What it does
 
