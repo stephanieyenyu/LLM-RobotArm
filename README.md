@@ -403,7 +403,8 @@ LLM_RobotArm/
 │   ├── MotionPlanner.cs             155 lines — Layer 4A, LLM robot-function composition
 │   ├── RobotPlan.cs                 112 lines — plan / SceneObject data classes
 │   ├── QRcode/                      4 printable ArUco markers (aruco_1–4.png)
-│   └── csharp_server.csproj         .NET 8, OnnxRuntime, OpenAI SDK, OpenCvSharp4, ZXing.Net
+│   ├── csharp_server.csproj         .NET 8, OnnxRuntime, OpenAI SDK, OpenCvSharp4, ZXing.Net
+│   └── requirements.txt             Python dependencies for perception_server.py
 ├── unity_project/Assets/Scripts/    Unity 2022.3.62f3 executor
 │   ├── JsonExecutor.cs              796 lines — Layer 4 executor, function sequence → URScript
 │   ├── SceneSyncer.cs               342 lines — snapshot sync + QR-frame↔Unity coordinate remap
@@ -418,7 +419,7 @@ LLM_RobotArm/
 │   ├── known-issues.md              categorized known issues
 │   ├── metrics.md                   codebase scale figures + open measurement TODOs
 │   └── llm_motion_planner.md        Layer 4A whitelist + safety-limit deep dive
-└── 專題_整合最新進度.docx            full formal project report (background, architecture, design, results, reflections)
+└── README.md
 ```
 
 ## Tech Stack
@@ -455,8 +456,8 @@ detection feed.
 
 Prerequisites:
 - .NET SDK 8+
-- Python 3.10+, using the `csharp_server/yolo11_env` venv — no
-  `requirements.txt` is committed to this repository (`docs/known-issues.md` D-4)
+- Python 3.10+, using the `csharp_server/yolo11_env` venv, with
+  dependencies from `csharp_server/requirements.txt`
 - Unity 2022.3.62f3
 - Intel RealSense D435i, USB3, connected directly (not through a hub)
 - `OPENAI_API_KEY` and `GEMINI_API_KEY` set via `setx` in PowerShell, then
@@ -467,9 +468,16 @@ Prerequisites:
   set to 0.170, speed slider at 100%
 - Four printed ArUco markers on the table (QR1 bottom-left, QR2
   bottom-right, QR3 top-left, QR4 top-right)
-- YOLO11n (and, if used, pliers) `.pt` weight files placed under
-  `csharp_server/` — these are gitignored and not distributed with this
-  repository (`docs/known-issues.md` C-1)
+
+**`yolo11n.pt` does not need to be sourced manually.** `perception_server.py`
+loads it via `YOLO(str(BASE_DIR / "yolo11n.pt"))`; when that file is
+missing, `ultralytics` downloads the standard COCO checkpoint from the
+Ultralytics GitHub releases straight into that path on first run —
+confirmed by testing the same load pattern against an empty directory.
+An internet connection is required the first time only. Pliers detection
+has no equivalent path: that was a custom-trained model, is not part of
+the public model zoo, and is disabled in code regardless
+(`docs/known-issues.md` C-1).
 
 **A second running instance will not fail loudly.** `JsonExecutor` guards
 against a duplicate command owner, but a stale Unity Play session left
@@ -477,11 +485,6 @@ running from a previous test, or a second `dotnet run` pointed at the
 same `StreamingAssets` files, can still leave two processes racing to
 read the same step file. Restart both terminals together rather than
 assuming a fresh `dotnet run` alone is enough.
-
-**Missing weight files fail silently, not loudly.** If `yolo11n.pt` isn't
-present, detection simply returns nothing rather than erroring in an
-obviously diagnosable way — check `/health`'s `frames_processed` and
-`detect_ms` fields first if nothing is being detected.
 
 ## Author
 
@@ -494,5 +497,4 @@ this repository's history only by student ID (`112034053`).
 The work was genuinely collaborative; commit authorship in this
 repository does not reliably indicate who wrote which part, since
 contributors shared machines during development. No course name or
-advisor is recorded in this repository or in the accompanying report
-(`專題_整合最新進度.docx`).
+advisor is recorded in this repository.

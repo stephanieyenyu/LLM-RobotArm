@@ -7,7 +7,7 @@ documentation gap, so the same question doesn't get re-investigated from
 scratch later.
 
 Snapshot: 2026-09-18, 81 commits, repository at
-`stephanieyenyu/LLM-RobotArm`.
+`stephanieyenyu/LLM-RobotArm`. Updated 2026-09-21 (C-1, C-2, D-1, D-2, D-4).
 
 | ID | Issue | Class | Disposition |
 |---|---|---|---|
@@ -17,12 +17,12 @@ Snapshot: 2026-09-18, 81 commits, repository at
 | B-1 | Demo video not yet linked in README | Unverified | Open |
 | B-2 | Greedy domino packing / source assignment optimality gap | Unverified | Open |
 | B-3 | 3D voxel prototype reachability/support not evaluated | Unverified | Open |
-| C-1 | Model `.pt` weight files not distributed with the repository | Defect | Fix recommended |
-| C-2 | Stray duplicate Unity project files at repository root | Defect | Fix recommended |
-| D-1 | `perception_server.py` docstring claims a pliers model is loaded | Documentation | Fix recommended |
-| D-2 | Written report and code disagree on the per-target retry limit | Documentation | Fix recommended |
+| C-1 | Model `.pt` weight files not distributed with the repository | Defect | **Fixed** — documented, less severe than thought |
+| C-2 | Stray duplicate Unity project files at repository root | Design limitation | Accepted, not fixed |
+| D-1 | `perception_server.py` docstring claims a pliers model is loaded | Documentation | **Fixed** |
+| D-2 | Written report and code disagree on the per-target retry limit | Documentation | No action (report removed from repo) |
 | D-3 | Old README claimed a single 5 cm cube shape; code defines two shapes | Documentation | No action (fixed in this rewrite) |
-| D-4 | No `requirements.txt` for the Python perception server | Documentation | Fix recommended |
+| D-4 | No `requirements.txt` for the Python perception server | Documentation | **Fixed** |
 | D-5 | Legacy "Part A" single-image detection prototype | Documentation | No action (superseded, recorded here) |
 | D-6 | Old README's file inventory omitted 9 of 21 source files | Documentation | No action (fixed in this rewrite) |
 | D-7 | Old README cited a 120 s timeout that doesn't exist in the current code | Documentation | No action (fixed in this rewrite) |
@@ -138,28 +138,28 @@ glyphs, neither of which exists yet.
 
 ### C-1 · Model `.pt` weight files not distributed with the repository
 
-**Symptom.** A fresh clone of this repository cannot detect anything —
-`yolo11n.pt` (and `models/pliers.pt`, if it were enabled) are not present
-on disk.
+**Symptom.** A fresh clone of this repository has no `yolo11n.pt` on disk.
 
-**Cause.** `.gitignore` excludes `*.pt`, and the files were never
-committed or otherwise made available alongside the repository.
+**Cause.** `.gitignore` excludes `*.pt`, and the file was never committed
+or otherwise made available alongside the repository.
 
-**Current exposure.** Confirmed absent by direct inspection of the
-working tree; the previous README's file inventory listed them as if
-present, which was misleading.
+**Turned out less severe than first assessed.** `perception_server.py`
+loads the model via `YOLO(str(BASE_DIR / "yolo11n.pt"))`. Tested directly:
+running that exact call against a path where the file doesn't exist
+causes `ultralytics` to download the standard COCO checkpoint from the
+Ultralytics GitHub releases into that path automatically — confirmed by
+running it against an empty directory and observing the download and a
+successful load. This is not a documentation-only fix; it changes what
+the defect actually is.
 
-**Consequence.** Detection silently returns nothing rather than erroring
-clearly — see the README's Running Locally section and Threats to
-Validity (Configuration).
+**What's still true.** `models/pliers.pt` has no equivalent path — it was
+a custom-trained model never published to any model zoo, so there is
+nothing for any tool to auto-fetch. This is moot in practice because
+pliers detection is disabled in code regardless (see D-1).
 
-**Fix direction.** Document where to obtain `yolo11n.pt` (e.g. the
-Ultralytics model zoo) and note that pliers detection is currently
-disabled regardless (see D-1), so its weight file isn't required to run
-the rest of the system.
-
-**Severity.** Blocks running the system from a clean clone; does not
-affect an already-set-up development machine.
+**Fixed.** README's Running Locally section now states the auto-download
+behaviour directly instead of listing the weight file as something to
+manually source, and drops the now-inaccurate "fails silently" framing.
 
 ---
 
@@ -187,11 +187,14 @@ but is missing at least one dependency the real project needs.
 
 **Fix direction.** Confirm the root-level `Packages/`/`ProjectSettings/`
 are unused, then remove them; keep `unity_project/` as the only real
-Unity project root. Not removed in this documentation pass — flagged
-here for the team to confirm before deleting anything.
+Unity project root.
 
 **Severity.** Low day-to-day (nobody currently opens the repo root as a
 Unity project), but confusing to a new contributor and worth cleaning up.
+
+**Accepted, not fixed — 2026-09-21.** Confirmed with the team: the
+severity assessment above (low day-to-day impact) is accepted as-is, and
+the folders are being left in place rather than removed.
 
 ---
 
@@ -211,6 +214,10 @@ clear the confidence bar on the real workspace").
 **Fix direction.** Update the docstring to match current behaviour, or
 remove the pliers reference until the feature is re-enabled.
 
+**Fixed.** The docstring now reads "自訓 pliers 模型因 domain gap 停用" (self-
+trained pliers model disabled due to domain gap) instead of describing it
+as loaded.
+
 ---
 
 ### D-2 · Written report and code disagree on the per-target retry limit
@@ -226,6 +233,13 @@ the code (see Measurement Basis).
 **Fix direction.** Either update the report to say 1, or change
 `MAX_RETRY` to 2 if 2 was actually intended — whichever reflects the
 team's current intent.
+
+**No action — 2026-09-21.** `專題_整合最新進度.docx` is removed from the
+repository as of this commit (the README now stands alone as the
+complete documentation). The comparison this entry describes is no
+longer checkable by a reader of this repository; kept here as a
+historical record of a discrepancy that existed while the report was
+present.
 
 ---
 
@@ -252,6 +266,12 @@ manifest and no `.env.example` for its configuration.
 
 **Fix direction.** Add a `requirements.txt` (or equivalent) pinning the
 versions actually used in `csharp_server/yolo11_env`.
+
+**Fixed, partially.** `csharp_server/requirements.txt` now lists the five
+third-party packages verified against the actual imports (`opencv-python`,
+`numpy`, `pyrealsense2`, `flask`, `ultralytics`). Unpinned — no lockfile
+or `pip freeze` output from `yolo11_env` was available to pin honest
+version numbers against, so pinning was left undone rather than guessed.
 
 ---
 

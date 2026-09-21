@@ -3,7 +3,7 @@ perception_server.py - 即時場景感知服務
 
 啟動時：
   1. 開啟外接 webcam 常駐串流
-  2. 載入 YOLO11n (COCO 常見物件) + 自訓 pliers 模型 + Aruco 偵測器
+  2. 載入 YOLO11n (COCO 常見物件) + Aruco 偵測器（自訓 pliers 模型因 domain gap 停用，見下方）
   3. 背景執行緒每 ~200ms 拍一幀、跑三種偵測、更新記憶體中的 sceneObjects
   4. 開一個 Flask HTTP server 讓 csharp_server 或瀏覽器隨時抓當下場景
 
